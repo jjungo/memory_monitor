@@ -3,6 +3,8 @@ name = "memory_monitor"
 version = "0.1.0"
 edition = "2021"
 description = "TUI hexdump monitor for live target memory over a SEGGER J-Link (nRF52840)"
+authors = ["Joël Jungo", "Joël Jungo <j.jungo@gmail.com>"]
+
 
 [[bin]]
 name = "memory_monitor"
