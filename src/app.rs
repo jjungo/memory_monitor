@@ -1,6 +1,7 @@
 //! Application state: the current memory snapshot plus per-byte change tracking.
 
 use crate::reader::MemReader;
+use crate::symbols::SymbolTable;
 use anyhow::Result;
 use std::time::{Duration, Instant};
 
@@ -41,11 +42,16 @@ pub struct App {
     pub input: String,
     /// Forces a read on the next loop iteration (used after a jump).
     pub force_refresh: bool,
+    /// ELF symbols, if `--elf` was supplied.
+    pub symbols: Option<SymbolTable>,
+    /// Whether the symbol overlay (title annotation + row gutter) is shown.
+    pub overlay: bool,
 }
 
 impl App {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config, symbols: Option<SymbolTable>) -> Self {
         let len = cfg.len;
+        let overlay = symbols.is_some();
         App {
             cfg,
             data: vec![0u8; len],
@@ -60,6 +66,8 @@ impl App {
             input_mode: false,
             input: String::new(),
             force_refresh: false,
+            symbols,
+            overlay,
         }
     }
 

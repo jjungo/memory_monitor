@@ -35,12 +35,32 @@ memory_monitor --mock --addr 0x2003F6C0 --len 0x140 --refresh 100
 
 A synthetic, self-mutating region for exercising the TUI and the highlight logic.
 
+## Symbol overlay (ELF)
+
+Point the monitor at the target's ELF and it maps live addresses back to symbol
+names: the title shows the symbol enclosing the base address, and each hexdump
+row gets a right-hand gutter naming the symbols that begin on it (bright) or the
+enclosing symbol with its offset (dim). Toggle the overlay with `s`.
+
+```sh
+memory_monitor --elf firmware.elf --addr 0x20006000 --len 0x80
+```
+
+With `--elf`, `--addr` (and the `Ctrl-G` go-to prompt) also accept **symbol
+names** instead of numbers. When `--addr` names a sized symbol and `--len` is
+omitted, the region defaults to that symbol's size:
+
+```sh
+memory_monitor --elf firmware.elf --addr g_state   # len = sizeof(g_state)
+```
+
 ## Options
 
 | flag | default | meaning |
 |------|---------|---------|
-| `--addr` | (required) | start address, `0x..` hex or decimal |
-| `--len` | `256` | bytes to monitor |
+| `--addr` | (required) | start address (`0x..` hex or decimal) or, with `--elf`, a symbol name |
+| `--len` | `256` | bytes to monitor (defaults to the symbol size when `--addr` names a sized symbol) |
+| `--elf` | — | ELF to load symbols from, enabling the symbol overlay and symbol-name addresses |
 | `--device` | `nRF52840_xxAA` | J-Link device name |
 | `--speed` | `4000` | SWD speed (kHz) |
 | `--refresh` | `200` | refresh interval (ms) |
@@ -54,10 +74,11 @@ A synthetic, self-mutating region for exercising the TUI and the highlight logic
 
 ## Keys
 
-| key |  ction |
+| key | action |
 |-----|--------|
 | `q` / `Esc` / `Ctrl-C` | quit |
 | `space` | pause / resume refresh |
+| `s` | toggle the ELF symbol overlay (when `--elf` is given) |
 | `+` / `-` | refresh interval ±50 ms |
 | `↑` `↓` `PgUp` `PgDn` | scroll |
 | `g` / `G` | top / bottom |

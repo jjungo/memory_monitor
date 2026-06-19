@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 ratatui = "0.29"
 libloading = "0.8"
+object = { version = "0.39.1", default-features = false, features = ["read", "std", "elf"] }
 
 [profile.release]
 opt-level = 3

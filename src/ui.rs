@@ -12,6 +12,18 @@ const HOT: Color = Color::Red;
 const ADDR_COL: Color = Color::DarkGray;
 const ASCII_COL: Color = Color::Gray;
 const HEX_COL: Color = Color::White;
+const SYM_START: Color = Color::Cyan; // a symbol begins on this row
+const SYM_CONT: Color = Color::DarkGray; // continuation of an enclosing symbol
+
+/// Trim an over-long symbol name (mangled C++ names can be huge) for display.
+fn short_name(name: &str) -> String {
+    const MAX: usize = 40;
+    if name.len() <= MAX {
+        name.to_string()
+    } else {
+        format!("{}…", &name[..MAX - 1])
+    }
+}
 
 /// Number of body rows the hex viewport can show for a given total height.
 pub fn viewport_rows(area_height: u16) -> usize {
@@ -32,9 +44,26 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 
 fn draw_title(f: &mut Frame, app: &App, area: Rect) {
     let c = &app.cfg;
+    // Annotate the base address with the enclosing symbol, when known.
+    let sym = if app.overlay {
+        app.symbols
+            .as_ref()
+            .and_then(|t| t.containing(c.addr))
+            .map(|(s, off)| {
+                if off == 0 {
+                    format!("  <{}>", short_name(&s.name))
+                } else {
+                    format!("  <{}+0x{:X}>", short_name(&s.name), off)
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let title = format!(
-        " Memory @ 0x{:08X}  +0x{:X} bytes  •  {} ms refresh  •  {}{} ",
+        " Memory @ 0x{:08X}{}  +0x{:X} bytes  •  {} ms refresh  •  {}{} ",
         c.addr,
+        sym,
         c.len,
         c.refresh.as_millis(),
         app.status,
@@ -55,7 +84,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if app.input_mode {
         let line = Line::from(vec![
             Span::styled(
-                " Go to address: ",
+                if app.symbols.is_some() { " Go to address / symbol: " } else { " Go to address: " },
                 Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -67,9 +96,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(line), area);
         return;
     }
+    let sym_help = match app.symbols.as_ref() {
+        Some(t) => format!(" │ s syms({}):{}", t.len(), if app.overlay { "on" } else { "off" }),
+        None => String::new(),
+    };
     let help = format!(
-        " q quit │ space pause │ +/- refresh │ ↑/↓ PgUp/PgDn scroll │ g/G top/bottom │ ^G goto │ reads:{} ",
-        app.reads
+        " q quit │ space pause │ +/- refresh │ ↑/↓ PgUp/PgDn scroll │ g/G top/bottom │ ^G goto{} │ reads:{} ",
+        sym_help, app.reads
     );
     f.render_widget(
         Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
@@ -163,6 +196,34 @@ fn hex_line<'a>(app: &App, now: Instant, row_off: usize, bpr: usize) -> Line<'a>
             Style::default().fg(ASCII_COL)
         };
         spans.push(Span::styled(ch.to_string(), style));
+    }
+
+    // Symbol gutter: name(s) starting on this row (bright), else the enclosing
+    // symbol as a dim continuation marker.
+    if app.overlay {
+        if let Some(tbl) = app.symbols.as_ref() {
+            let row_addr = c.addr.wrapping_add(row_off as u32);
+            let row_len = (c.len - row_off).min(bpr) as u32;
+            let starts = tbl.starting_in(row_addr, row_len);
+            if !starts.is_empty() {
+                let label = starts
+                    .iter()
+                    .map(|s| short_name(&s.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(SYM_START).add_modifier(Modifier::BOLD),
+                ));
+            } else if let Some((s, off)) = tbl.containing(row_addr) {
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled(
+                    format!("{}+0x{:X}", short_name(&s.name), off),
+                    Style::default().fg(SYM_CONT).add_modifier(Modifier::DIM),
+                ));
+            }
+        }
     }
 
     Line::from(spans)

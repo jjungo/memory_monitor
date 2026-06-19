@@ -6,10 +6,12 @@
 
 mod app;
 mod reader;
+mod symbols;
 mod ui;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use app::{App, Config, Endian};
+use symbols::SymbolTable;
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -42,13 +44,20 @@ fn parse_usize(s: &str) -> Result<usize, String> {
     long_about = None,
 )]
 struct Cli {
-    /// Start address of the region to monitor (e.g. 0x2003F6C0).
-    #[arg(short, long, value_parser = parse_u32)]
-    addr: u32,
+    /// Start of the region: a hex/decimal address (e.g. 0x2003F6C0) or, with
+    /// `--elf`, a symbol name (e.g. g_state).
+    #[arg(short, long)]
+    addr: String,
 
-    /// Number of bytes to monitor (e.g. 0x140 or 320).
-    #[arg(short, long, value_parser = parse_usize, default_value = "256")]
-    len: usize,
+    /// Number of bytes to monitor (e.g. 0x140 or 320). Defaults to the symbol
+    /// size when `--addr` names a sized symbol, otherwise 256.
+    #[arg(short, long, value_parser = parse_usize)]
+    len: Option<usize>,
+
+    /// Firmware ELF to load symbols from, enabling the symbol overlay and
+    /// symbol-name addresses.
+    #[arg(long)]
+    elf: Option<String>,
 
     /// J-Link target device name.
     #[arg(short, long, default_value = "nRF52840_xxAA")]
@@ -100,12 +109,38 @@ fn main() -> Result<()> {
     if cli.width == 0 || cli.width % cli.word != 0 {
         bail!("--width ({}) must be a non-zero multiple of --word ({})", cli.width, cli.word);
     }
-    if cli.len == 0 {
+    // Load ELF symbols up front so addresses can be given as symbol names.
+    let symbols = match &cli.elf {
+        Some(p) => {
+            let t = SymbolTable::load(p).context("loading ELF symbols")?;
+            eprintln!("loaded {} symbols from {}", t.len(), t.path);
+            Some(t)
+        }
+        None => None,
+    };
+
+    // Resolve --addr: a number if it parses as one, otherwise a symbol name.
+    let addr = match parse_u32(&cli.addr) {
+        Ok(v) => v,
+        Err(numerr) => match &symbols {
+            Some(tbl) => tbl
+                .resolve(&cli.addr)
+                .ok_or_else(|| anyhow!("--addr `{}`: not a number and no such symbol in the ELF", cli.addr))?,
+            None => bail!("--addr `{}`: {} (pass --elf to use symbol names)", cli.addr, numerr),
+        },
+    };
+
+    // --len defaults to the symbol's size when --addr named a sized symbol.
+    let len = cli
+        .len
+        .or_else(|| symbols.as_ref().and_then(|t| t.size_of(&cli.addr)).map(|s| s as usize))
+        .unwrap_or(256);
+    if len == 0 {
         bail!("--len must be greater than 0");
     }
 
     let mut reader: Box<dyn MemReader> = if cli.mock {
-        Box::new(MockReader::new(cli.addr, cli.len))
+        Box::new(MockReader::new(addr, len))
     } else {
         Box::new(
             JLinkReader::connect(cli.lib.as_deref(), &cli.device, cli.speed, cli.serial)
@@ -114,15 +149,15 @@ fn main() -> Result<()> {
     };
 
     let cfg = Config {
-        addr: cli.addr,
-        len: cli.len,
+        addr,
+        len,
         bytes_per_row: cli.width,
         word_size: cli.word,
         endian: if cli.big_endian { Endian::Big } else { Endian::Little },
         refresh: Duration::from_millis(cli.refresh),
         highlight: Duration::from_millis(cli.highlight),
     };
-    let mut app = App::new(cfg);
+    let mut app = App::new(cfg, symbols);
 
     run_tui(&mut app, reader.as_mut())
 }
@@ -188,22 +223,33 @@ fn event_loop<B: ratatui::backend::Backend>(
                             app.input.clear();
                         }
                         KeyCode::Enter => {
-                            // Address field: interpret input as hex (0x prefix optional).
+                            // Interpret input as a hex address (0x optional), or,
+                            // failing that, as an ELF symbol name.
                             let s = app.input.trim();
                             let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
-                            if let Ok(addr) = u32::from_str_radix(hex, 16) {
+                            let target = u32::from_str_radix(hex, 16)
+                                .ok()
+                                .or_else(|| app.symbols.as_ref().and_then(|t| t.resolve(s)));
+                            if let Some(addr) = target {
                                 app.goto(addr);
                                 app.input_mode = false;
                                 app.input.clear();
                             }
-                            // On a parse error, keep the prompt open so it can be fixed.
+                            // On a miss, keep the prompt open so it can be fixed.
                         }
                         KeyCode::Backspace => {
                             app.input.pop();
                         }
                         KeyCode::Char('c') if ctrl => break,
-                        KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' || c == 'X' => {
-                            if app.input.len() < 10 {
+                        // Hex digits always; full symbol-name charset when an ELF is loaded.
+                        KeyCode::Char(c)
+                            if c.is_ascii_hexdigit()
+                                || c == 'x'
+                                || c == 'X'
+                                || (app.symbols.is_some()
+                                    && (c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$')) =>
+                        {
+                            if app.input.len() < 64 {
                                 app.input.push(c);
                             }
                         }
@@ -220,6 +266,7 @@ fn event_loop<B: ratatui::backend::Backend>(
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if ctrl => break,
                     KeyCode::Char(' ') => app.paused = !app.paused,
+                    KeyCode::Char('s') if app.symbols.is_some() => app.overlay = !app.overlay,
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         app.cfg.refresh = (app.cfg.refresh + Duration::from_millis(50))
                             .min(Duration::from_secs(10));
